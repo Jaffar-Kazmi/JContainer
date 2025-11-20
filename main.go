@@ -27,13 +27,14 @@ func main() {
 func run() {
 	fmt.Printf("Parent: Running %v as PID %d\n", os.Args[2:], os.Getpid())
 
-	cmd := exec.Command("/proc/self/exe", append([]string{"child"}, os.Args[2:]...)...)
+	// Create cgroup BEFORE starting the process
+	cgroupPath := setupCgroup()
+
+	cmd := exec.Command("/proc/self/exe", append([]string{"child", cgroupPath}, os.Args[2:]...)...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	// Create cgroup BEFORE starting the process
-	cgroupPath := setupCgroup()
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: syscall.CLONE_NEWUTS |
@@ -41,7 +42,7 @@ func run() {
 			syscall.CLONE_NEWNS,
 	}
 
-	// Start the process (don't wait yet)
+	// Start the process
 	must(cmd.Start())
 
 	fmt.Printf("Parent: Started child process, waiting for completion\n")
@@ -56,12 +57,19 @@ func run() {
 func child() {
 	fmt.Printf("Child: Running %v as PID %d\n", os.Args[2:], os.Getpid())
 
+	if len(os.Args) < 4 {
+		panic("Usage: child <cgroup> <command> [args...]")
+	}
+
+	cgroupPath := os.Args[2]
+	command := os.Args[3]
+	args := os.Args[4:]
+
 	pid := os.Getpid()
-	cgroupPath := "/sys/fs/cgroup/jcontainer"
 
 	// Write our PID to the cgroup
 	must(os.WriteFile(cgroupPath+"/cgroup.procs", []byte(strconv.Itoa(pid)), 0644))
-	fmt.Printf("Child: Added self (PID %d) to cgroup\n", pid)
+	fmt.Printf("Child: Added self (PID %d) to cgroup %s\n", pid, cgroupPath)
 
 	// Set hostname in new UTS namespace
 	must(syscall.Sethostname([]byte("jcontainer")))
@@ -74,7 +82,7 @@ func child() {
 	must(syscall.Mount("proc", "proc", "proc", 0, ""))
 
 	// Run the actual command
-	cmd := exec.Command(os.Args[2], os.Args[3:]...)
+	cmd := exec.Command(command, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -86,7 +94,9 @@ func child() {
 }
 
 func setupCgroup() string {
-	cgroupPath := "/sys/fs/cgroup/jcontainer"
+	cgroupBase := "/sys/fs/cgroup"
+	cgroupName := fmt.Sprintf("jcontainer-%d", os.Getpid())
+	cgroupPath := cgroupBase + "/" + cgroupName
 
 	os.RemoveAll(cgroupPath)
 
