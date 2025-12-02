@@ -1,6 +1,10 @@
 package main
 
+// docker           run  /bin/bash
+// go run main.go   run /bin/bash
+
 import (
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -8,33 +12,53 @@ import (
 	"syscall"
 )
 
+var (
+	flagPids = flag.Int("pids", 10, "maximum number of processess in a container")
+	flagMemory = flag.String("memory", "100M", "memory limit (e.g 50M, 1G)")
+	flagCPU = flag.String("cpu", "50%", "CPU limit as percentage of one core (e.g 50%)")
+	flagRootfs = flag.String("rootfs", "home/jaffar/Documents/Lectures/OSLabs/project/jroot", "base rootfs (lowerdir) path")
+)
+
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("Usage: go run main.go run <command> [args...]")
-		os.Exit(1)
+	flag.Parse()
+
+	if flag.NArg() < 1 {
+		fmt.Println("Usage: main [--pids N --memory 50M --cpu 50% --rootfs PATH] run <command> [args...]")
+        os.Exit(1)
 	}
 
-	switch os.Args[1] {
+	cmd := flag.Arg(0)
+
+	switch cmd {
 	case "run":
-		run()
+		if flag.NArg() < 2 {
+            fmt.Println("Usage: main run <command> [args...]")
+            os.Exit(1)
+        }
+		run(flag.Args()[1:])
 	case "child":
-		child()
+		child(flag.Args()[1:])
 	default:
 		panic("Bad command. Use 'run' or 'child'")
 	}
 }
 
-func run() {
-	fmt.Printf("Parent: Running %v as PID %d\n", os.Args[2:], os.Getpid())
+func run(cmdArgs []string) {
+	fmt.Printf("Parent: Running %v as PID %d\n", cmdArgs, os.Getpid())
+
+	 if len(cmdArgs) < 1 {
+        fmt.Println("run: missing command")
+        os.Exit(1)
+    }
 
 	containerID := strconv.Itoa(os.Getpid())
 
 	// Create cgroup BEFORE starting the process
 	cgroupPath := setupCgroup()
 
-	cmd := exec.Command(
-		"/proc/self/exe", 
-		append([]string{"child", cgroupPath, containerID}, os.Args[2:]...)...)
+	childArgs := append([]string{"child", cgroupPath, containerID}, cmdArgs...)
+
+	cmd := exec.Command("/proc/self/exe", childArgs...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -58,17 +82,18 @@ func run() {
 	cleanupOverlay(containerID)
 }
 
-func child() {
-	fmt.Printf("Child: Running %v as PID %d\n", os.Args[2:], os.Getpid())
+func child(args []string) {
+	fmt.Printf("Child: Running %v as PID %d\n", args, os.Getpid())
 
-	if len(os.Args) < 5 {
+	if len(args) < 3 {
 		panic("Usage: child <cgroup> <containerID> <command> [args...]")
 	}
 
-	cgroupPath := os.Args[2]
-	containerID := os.Args[3]
-	command := os.Args[4]
-	args := os.Args[5:]
+	cgroupPath := args[0]
+	containerID := args[1]
+	command := args[2]
+	cmdArgs := args[3:]
+
 
 	pid := os.Getpid()
 
@@ -92,7 +117,7 @@ func child() {
 	must(syscall.Mount("proc", "proc", "proc", 0, ""))
 
 	// Run the actual command
-	cmd := exec.Command(command, args...)
+	cmd := exec.Command(command, cmdArgs...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -115,13 +140,16 @@ func setupCgroup() string {
 	fmt.Println("Created cgroup:", cgroupPath)
 
 	// Set PID limit to 10 processes
-	must(os.WriteFile(cgroupPath+"/pids.max", []byte("10"), 0644))
+	must(os.WriteFile(cgroupPath+"/pids.max", []byte(strconv.Itoa(*flagPids)), 0644))
 
 	// Add memory limit
-	must(os.WriteFile(cgroupPath + "/memory.max", []byte("104857600"), 0644))
+	memBytes := parseMemoryLimit(*flagMemory)
+	must(os.WriteFile(cgroupPath + "/memory.max", []byte(strconv.Itoa(memBytes)), 0644))
 
 	// Add CPU limit
-	must(os.WriteFile(cgroupPath + "/cpu.max", []byte("50000 100000"), 0644))
+	quota, period := parseCPULimit(*flagCPU)
+	cpuMax := fmt.Sprintf("%d %d", quota, period)
+	must(os.WriteFile(cgroupPath + "/cpu.max", []byte(cpuMax), 0644))
 
 	return cgroupPath
 }
@@ -130,6 +158,46 @@ func cleanupCgroup(cgroupPath string) {
 	// Remove the cgroup directory
 	os.Remove(cgroupPath)
 	fmt.Println("Cleaned up cgroup:", cgroupPath)
+}
+
+func parseMemoryLimit(s string) int {
+	if len(s) == 0 {
+		return 104857600
+	}
+	last := s[len(s)-1]
+	num := s[:len(s)-1]
+	
+	switch last {
+	case 'M', 'm':
+		v, _ := strconv.Atoi(num)
+		return v * 1024 * 1024
+	case 'G', 'g':
+		v, _ := strconv.Atoi(num)
+		return v * 1024 * 1024 * 1024
+	default:
+		v, _ := strconv.Atoi(s)
+		return v
+	}
+}
+
+func parseCPULimit(s string) (quota , period int) {
+	if len(s) == 0 {
+		return 50000, 100000
+	}
+	
+	if s[len(s)-1] == '%' {
+		v, _ := strconv.Atoi(s[:len(s)-1])
+		period = 100000
+		quota = v * period / 100
+		return quota, period
+	}
+
+	var q, p int
+	fmt.Sscanf(s, "%d:%d", &q, &p)
+	if q == 0 || p == 0 {
+		return 50000, 100000
+	}
+	return q, p	
 }
 
 func settupOverlayFS(containerID string) (string, error) {
