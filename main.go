@@ -13,10 +13,10 @@ import (
 )
 
 var (
-	flagPids = flag.Int("pids", 10, "maximum number of processess in a container")
+	flagPids   = flag.Int("pids", 10, "maximum number of processess in a container")
 	flagMemory = flag.String("memory", "100M", "memory limit (e.g 50M, 1G)")
-	flagCPU = flag.String("cpu", "50%", "CPU limit as percentage of one core (e.g 50%)")
-	flagRootfs = flag.String("rootfs", "home/jaffar/Documents/Lectures/OSLabs/project/jroot", "base rootfs (lowerdir) path")
+	flagCPU    = flag.String("cpu", "50%", "CPU limit as percentage of one core (e.g 50%)")
+	flagRootfs = flag.String("rootfs", "/home/jaffar/Documents/Lectures/OSLabs/Project/jroot", "base rootfs (lowerdir) path")
 )
 
 func main() {
@@ -24,7 +24,7 @@ func main() {
 
 	if flag.NArg() < 1 {
 		fmt.Println("Usage: main [--pids N --memory 50M --cpu 50% --rootfs PATH] run <command> [args...]")
-        os.Exit(1)
+		os.Exit(1)
 	}
 
 	cmd := flag.Arg(0)
@@ -32,9 +32,9 @@ func main() {
 	switch cmd {
 	case "run":
 		if flag.NArg() < 2 {
-            fmt.Println("Usage: main run <command> [args...]")
-            os.Exit(1)
-        }
+			fmt.Println("Usage: main run <command> [args...]")
+			os.Exit(1)
+		}
 		run(flag.Args()[1:])
 	case "child":
 		child(flag.Args()[1:])
@@ -46,23 +46,28 @@ func main() {
 func run(cmdArgs []string) {
 	fmt.Printf("Parent: Running %v as PID %d\n", cmdArgs, os.Getpid())
 
-	 if len(cmdArgs) < 1 {
-        fmt.Println("run: missing command")
-        os.Exit(1)
-    }
+	if len(cmdArgs) < 1 {
+		fmt.Println("run: missing command")
+		os.Exit(1)
+	}
 
 	containerID := strconv.Itoa(os.Getpid())
 
 	// Create cgroup BEFORE starting the process
 	cgroupPath := setupCgroup()
 
-	childArgs := append([]string{"child", cgroupPath, containerID}, cmdArgs...)
+	childArgs := []string{
+		"--pids", strconv.Itoa(*flagPids),
+		"--memory", *flagMemory,
+		"--cpu", *flagCPU,
+		"--rootfs", *flagRootfs,
+		"child", cgroupPath, containerID}
+	childArgs = append(childArgs, cmdArgs...)
 
 	cmd := exec.Command("/proc/self/exe", childArgs...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: syscall.CLONE_NEWUTS |
@@ -94,7 +99,6 @@ func child(args []string) {
 	command := args[2]
 	cmdArgs := args[3:]
 
-
 	pid := os.Getpid()
 
 	// Write our PID to the cgroup
@@ -107,7 +111,6 @@ func child(args []string) {
 	mergedDir, err := settupOverlayFS(containerID)
 	must(err)
 	fmt.Printf("Child: Using overlay merged dir %s as new root\n", mergedDir)
-
 
 	// Change root filesystem to merged overlay
 	must(syscall.Chroot(mergedDir))
@@ -144,12 +147,12 @@ func setupCgroup() string {
 
 	// Add memory limit
 	memBytes := parseMemoryLimit(*flagMemory)
-	must(os.WriteFile(cgroupPath + "/memory.max", []byte(strconv.Itoa(memBytes)), 0644))
+	must(os.WriteFile(cgroupPath+"/memory.max", []byte(strconv.Itoa(memBytes)), 0644))
 
 	// Add CPU limit
 	quota, period := parseCPULimit(*flagCPU)
 	cpuMax := fmt.Sprintf("%d %d", quota, period)
-	must(os.WriteFile(cgroupPath + "/cpu.max", []byte(cpuMax), 0644))
+	must(os.WriteFile(cgroupPath+"/cpu.max", []byte(cpuMax), 0644))
 
 	return cgroupPath
 }
@@ -166,7 +169,7 @@ func parseMemoryLimit(s string) int {
 	}
 	last := s[len(s)-1]
 	num := s[:len(s)-1]
-	
+
 	switch last {
 	case 'M', 'm':
 		v, _ := strconv.Atoi(num)
@@ -180,11 +183,11 @@ func parseMemoryLimit(s string) int {
 	}
 }
 
-func parseCPULimit(s string) (quota , period int) {
+func parseCPULimit(s string) (quota, period int) {
 	if len(s) == 0 {
 		return 50000, 100000
 	}
-	
+
 	if s[len(s)-1] == '%' {
 		v, _ := strconv.Atoi(s[:len(s)-1])
 		period = 100000
@@ -197,13 +200,24 @@ func parseCPULimit(s string) (quota , period int) {
 	if q == 0 || p == 0 {
 		return 50000, 100000
 	}
-	return q, p	
+	return q, p
 }
 
 func settupOverlayFS(containerID string) (string, error) {
-	// Base path
-	baseDir := "/home/jaffar/Documents/Lectures/OSLabs/Project"
-	lowerDir := baseDir + "/jroot"  // lower read only image
+	fmt.Println("DEBUG: flagRootfs =", *flagRootfs)
+	baseDir := *flagRootfs
+	lowerDir := baseDir
+
+	info, err := os.Stat(lowerDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("lowerdir %s does not exist", lowerDir)
+		}
+		return "", fmt.Errorf("error checking lowerdir %s: %v", lowerDir, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("lowerdir %s is not a directory", lowerDir)
+	}
 
 	// overlay directories on host
 
@@ -213,10 +227,10 @@ func settupOverlayFS(containerID string) (string, error) {
 	mergedDir := overlayBase + "/merged"
 
 	// Debug prints
-    fmt.Println("overlay lower =", lowerDir)
-    fmt.Println("overlay upper =", upperDir)
-    fmt.Println("overlay work  =", workDir)
-    fmt.Println("overlay merged=", mergedDir)
+	fmt.Println("overlay lower =", lowerDir)
+	fmt.Println("overlay upper =", upperDir)
+	fmt.Println("overlay work  =", workDir)
+	fmt.Println("overlay merged=", mergedDir)
 
 	for _, dir := range []string{upperDir, workDir, mergedDir} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
@@ -234,7 +248,7 @@ func settupOverlayFS(containerID string) (string, error) {
 
 	fmt.Printf("OverlayFS mounted: lower=%s upper=%s work=%s merged=%s\n", lowerDir, upperDir, workDir, mergedDir)
 
-	return mergedDir, nil	
+	return mergedDir, nil
 }
 
 func cleanupOverlay(containerID string) {
