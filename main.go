@@ -13,10 +13,11 @@ import (
 )
 
 var (
-	flagPids   = flag.Int("pids", 10, "maximum number of processess in a container")
-	flagMemory = flag.String("memory", "100M", "memory limit (e.g 50M, 1G)")
-	flagCPU    = flag.String("cpu", "50%", "CPU limit as percentage of one core (e.g 50%)")
-	flagRootfs = flag.String("rootfs", "/home/jaffar/Documents/Lectures/OSLabs/Project/jroot", "base rootfs (lowerdir) path")
+	flagPids    = flag.Int("pids", 10, "maximum number of processess in a container")
+	flagMemory  = flag.String("memory", "100M", "memory limit (e.g 50M, 1G)")
+	flagCPU     = flag.String("cpu", "50%", "CPU limit as percentage of one core (e.g 50%)")
+	flagRootfs  = flag.String("rootfs", "/home/jaffar/Documents/Lectures/OSLabs/Project/jroot", "base rootfs (lowerdir) path")
+	flagNetwork = flag.Bool("network", false, "enable network messages with veth pair")
 )
 
 func main() {
@@ -56,12 +57,19 @@ func run(cmdArgs []string) {
 	// Create cgroup BEFORE starting the process
 	cgroupPath := setupCgroup()
 
+	// Build child args with all flags passed and containerID
 	childArgs := []string{
 		"--pids", strconv.Itoa(*flagPids),
 		"--memory", *flagMemory,
 		"--cpu", *flagCPU,
 		"--rootfs", *flagRootfs,
-		"child", cgroupPath, containerID}
+	}
+
+	if *flagNetwork {
+		childArgs = append(childArgs, "--network")
+	}
+
+	childArgs = append(childArgs, "child", cgroupPath, containerID)
 	childArgs = append(childArgs, cmdArgs...)
 
 	cmd := exec.Command("/proc/self/exe", childArgs...)
@@ -69,20 +77,34 @@ func run(cmdArgs []string) {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
+	cloneflags := syscall.CLONE_NEWUTS | syscall.CLONE_NEWPID | syscall.CLONE_NEWNS
+	if *flagNetwork {
+		cloneflags |= syscall.CLONE_NEWNET
+	}
+
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Cloneflags: syscall.CLONE_NEWUTS |
-			syscall.CLONE_NEWPID |
-			syscall.CLONE_NEWNS,
+		Cloneflags: uintptr(cloneflags),
 	}
 
 	// Start the process
 	must(cmd.Start())
-	fmt.Printf("Parent: Started child process, waiting for completion\n")
+	childPID := cmd.Process.Pid
+	fmt.Printf("Parent: Started child process PID=%d (container %s), waiting for completion\n", childPID, containerID)
 
-	// Now wait for it to finish
+	// Setup networking if enabled (use child PID for netns)
+	if *flagNetwork {
+		if err := setupContainerVeth(childPID, containerID); err != nil {
+			fmt.Printf("Network setup failed: %v\n", err)
+		}
+	}
+
+	// Wait for container process to exit
 	must(cmd.Wait())
 
-	// Cleanup cgroup
+	// Cleanup
+	if *flagNetwork {
+		cleanupVeth(containerID)
+	}
 	cleanupCgroup(cgroupPath)
 	cleanupOverlay(containerID)
 }
@@ -107,6 +129,12 @@ func child(args []string) {
 
 	// Set hostname in new UTS namespace
 	must(syscall.Sethostname([]byte("jcontainer")))
+
+	if *flagNetwork {
+		if err := configureContainerVeth(containerID); err != nil {
+			fmt.Printf("Container Network setup failed: %v\n", err)
+		}
+	}
 
 	mergedDir, err := settupOverlayFS(containerID)
 	must(err)
@@ -261,6 +289,65 @@ func cleanupOverlay(containerID string) {
 
 	fmt.Printf("Cleaned up overlay: %s\n", overlayBase)
 
+}
+
+func setupContainerVeth(childPID int, containerID string) error {
+	hostIf := fmt.Sprintf("veth-host-%s", containerID)
+	contIf := fmt.Sprintf("veth-cont-%s", containerID)
+
+	fmt.Printf("Creating veth pair: %s <-> %s\n", hostIf, contIf)
+
+	// 1. Create veth pair
+	if err := exec.Command("ip", "link", "add", hostIf, "type", "veth", "peer", "name", contIf).Run(); err != nil {
+		return fmt.Errorf("create veth pair: %w", err)
+	}
+
+	// 2. Move container end to child netns (use childPID only here)
+	if err := exec.Command("ip", "link", "set", contIf, "netns", strconv.Itoa(childPID)).Run(); err != nil {
+		return fmt.Errorf("move %s to netns %d: %w", contIf, childPID, err)
+	}
+
+	// 3. Configure host side
+	if err := exec.Command("ip", "addr", "add", "172.18.0.1/24", "dev", hostIf).Run(); err != nil {
+		return fmt.Errorf("host IP %s: %w", hostIf, err)
+	}
+	if err := exec.Command("ip", "link", "set", hostIf, "up").Run(); err != nil {
+		return fmt.Errorf("host up %s: %w", hostIf, err)
+	}
+
+	fmt.Printf("Host veth %s (172.18.0.1/24) → container netns %d\n", hostIf, childPID)
+	return nil
+}
+
+func configureContainerVeth(childPID string) error {
+	contIf := fmt.Sprintf("veth-cont-%s", childPID)
+
+	fmt.Printf("Configuring container eth0 from %s\n", contIf)
+
+	if err := exec.Command("ip", "link", "set", contIf, "name", "eth0").Run(); err != nil {
+		return fmt.Errorf("rename %s -> eth0: %w", contIf, err)
+	}
+
+	if err := exec.Command("ip", "addr", "add", "172.18.0.2/24", "dev", "eth0").Run(); err != nil {
+		return fmt.Errorf("IP eth0: %w", err)
+	}
+	if err := exec.Command("ip", "link", "set", "eth0", "up").Run(); err != nil {
+		return fmt.Errorf("eth0 up: %w", err)
+	}
+
+	// 4. Add default route via host
+	if err := exec.Command("ip", "route", "add", "default", "via", "172.18.0.1").Run(); err != nil {
+		return fmt.Errorf("default route: %w", err)
+	}
+
+	fmt.Printf("Container eth0 (172.18.0.2/24) configured\n")
+	return nil
+}
+
+func cleanupVeth(containerID string) {
+	hostIf := fmt.Sprintf("veth-host-%s", containerID)
+	_ = exec.Command("ip", "link", "del", hostIf).Run()
+	fmt.Printf("Cleaned up veth: %s\n", hostIf)
 }
 
 func must(err error) {
