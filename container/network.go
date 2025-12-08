@@ -138,14 +138,16 @@ func setupContainerVeth(childPID int, containerID string) error {
 		fmt.Printf("warning: failed to set forwarding rules: %v\n", err)
 	}
 
-	hostIf := fmt.Sprintf("veth-host-%s", containerID)
-	contIf := fmt.Sprintf("veth-cont-%s", containerID)
+	hostIf := fmt.Sprintf("veth-h-%s", containerID)
+	contIf := fmt.Sprintf("veth-c-%s", containerID)
 
 	fmt.Printf("Creating veth pair: %s <-> %s\n", hostIf, contIf)
 
 	// 1. Create veth pair
-	if err := exec.Command("ip", "link", "add", hostIf, "type", "veth", "peer", "name", contIf).Run(); err != nil {
-		return fmt.Errorf("create veth pair: %w", err)
+	cmd := exec.Command("ip", "link", "add", hostIf, "type", "veth", "peer", "name", contIf)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("create veth pair (%s): %v: %s", hostIf, err, string(out))
 	}
 
 	// 2. Attach host end to bridge jcbr0
@@ -168,7 +170,7 @@ func setupContainerVeth(childPID int, containerID string) error {
 }
 
 func configureContainerVeth(containerID, ipCIDR, gateway string) error {
-	contIf := fmt.Sprintf("veth-cont-%s", containerID)
+	contIf := fmt.Sprintf("veth-c-%s", containerID)
 	fmt.Printf("Configuring container eth0 from %s\n", contIf)
 
 	// Wait for veth to appear in this netns
@@ -183,7 +185,7 @@ func configureContainerVeth(containerID, ipCIDR, gateway string) error {
 		}
 	}
 
-	// 1. Rename veth-cont -> eth0
+	// 1. Rename veth-c -> eth0
 	if err := exec.Command("ip", "link", "set", contIf, "name", "eth0").Run(); err != nil {
 		return fmt.Errorf("rename %s -> eth0: %w", contIf, err)
 	}
@@ -208,7 +210,7 @@ func configureContainerVeth(containerID, ipCIDR, gateway string) error {
 }
 
 func cleanupVeth(containerID string) {
-	hostIf := fmt.Sprintf("veth-host-%s", containerID)
+	hostIf := fmt.Sprintf("veth-h-%s", containerID)
 	_ = exec.Command("ip", "link", "del", hostIf).Run()
 	fmt.Printf("Cleaned up veth: %s\n", hostIf)
 }
