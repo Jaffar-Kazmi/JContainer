@@ -7,6 +7,30 @@ import (
 	"time"
 )
 
+func ensureBridge(name, cidr string) error {
+    // 1) Check if bridge already exists
+    cmd := exec.Command("ip", "link", "show", name)
+    if err := cmd.Run(); err == nil {
+        // Exists: make sure it's up and has IP
+        exec.Command("ip", "link", "set", name, "up").Run()
+        exec.Command("ip", "addr", "add", cidr, "dev", name).Run() // ignore "File exists"
+        return nil
+    }
+
+    // 2) Create bridge
+    if err := exec.Command("ip", "link", "add", "name", name, "type", "bridge").Run(); err != nil {
+        return fmt.Errorf("create bridge %s: %w", name, err)
+    }
+    if err := exec.Command("ip", "addr", "add", cidr, "dev", name).Run(); err != nil {
+        return fmt.Errorf("assign ip to bridge %s: %w", name, err)
+    }
+    if err := exec.Command("ip", "link", "set", name, "up").Run(); err != nil {
+        return fmt.Errorf("set bridge %s up: %w", name, err)
+    }
+    return nil
+}
+
+
 func addPortPublishRule(containerIP string, pm PortMapping, hostIP string) error {
     if hostIP == "" {
         return fmt.Errorf("no host IP available")
@@ -52,6 +76,13 @@ func deletePortPublishRule(containerIP string, pm PortMapping, hostIP string) {
 }
 
 func setupContainerVeth(childPID int, containerID string) error {
+    const bridgeName = "jcbr0"
+    const bridgeCIDR = "10.0.0.1/24"
+
+    if err := ensureBridge(bridgeName, bridgeCIDR); err != nil {
+        return err
+    }
+    
 	hostIf := fmt.Sprintf("veth-host-%s", containerID)
 	contIf := fmt.Sprintf("veth-cont-%s", containerID)
 

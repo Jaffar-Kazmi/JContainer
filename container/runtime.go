@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"strconv"
 	"syscall"
+	"time"
 )
 
 func Run(cfg Config, cmdArgs []string) {
@@ -86,6 +87,21 @@ func Run(cfg Config, cmdArgs []string) {
 			fmt.Println("HostIP is empty, skipping --publish rules")
 		}
 	}
+
+	mergedDir := fmt.Sprintf("/tmp/jcontainer-%s/merged", containerID)
+    state := ContainerState {
+        ID:        containerID,
+        InitPID:   childPID,
+        IP:        ipBare,
+        CreatedAt: time.Now(),
+        Command:   cmdArgs,
+        MergedDir: mergedDir,
+    }
+
+	if err := writeState(&state); err != nil {
+        fmt.Printf("failed to write state: %v\n", err)
+    }
+
 
 	// 7) Wait and cleanup
 	must(cmd.Wait())
