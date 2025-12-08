@@ -17,7 +17,7 @@ func setupCgroup(cfg Config) string {
 	must(os.MkdirAll(cgroupPath, 0755))
 	fmt.Println("Created cgroup:", cgroupPath)
 
-	// Set PID limit to 10 processes
+	// Set PID limit
 	must(os.WriteFile(cgroupPath+"/pids.max", []byte(strconv.Itoa(cfg.Pids)), 0644))
 
 	// Add memory limit

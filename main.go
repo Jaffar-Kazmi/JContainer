@@ -1,7 +1,7 @@
 package main
 
-// docker           run  /bin/bash
-// go run main.go   run /bin/bash
+// sudo docker           run /bin/bash
+// sudo go run main.go   run /bin/bash
 
 import (
 	"flag"
@@ -84,8 +84,29 @@ func main() {
 			os.Exit(1)
 		}
 		container.Run(cfg, flag.Args()[1:])
+
 	case "child":
 		container.Child(cfg, flag.Args()[1:])
+
+	case "ps":
+		container.Ps()
+
+	case "stop":
+		if flag.NArg() < 2 {
+			fmt.Println("Usage: main stop <containerID>")
+			os.Exit(1)
+		}
+		container.Stop(flag.Arg(1))
+
+	case "exec":
+		if flag.NArg() < 3 {
+			fmt.Println("Usage: jcontainer exec <id> <command> [args...]")
+			os.Exit(1)
+		}
+		id := flag.Arg(1)
+		cmdArgs := flag.Args()[2:]
+		container.Exec(id, cmdArgs)
+
 	default:
 		panic("Bad command. Use 'run' or 'child'")
 	}
